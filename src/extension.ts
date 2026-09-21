@@ -41,29 +41,30 @@ async function showSiblingFiles(): Promise<void> {
   const parentDirectory = path.dirname(currentDirectory);
 
   const [currentItems, parentItems] = await Promise.all([
-    getDirectoryItems(currentDirectory),
-    getDirectoryItems(parentDirectory),
+    getCurrentDirectoryItems(currentDirectory, currentFile),
+    getParentDirectoryItems(parentDirectory),
   ]);
 
   const items: FileItem[] = [
     {
-      label: "$(folder-opened) Current directory",
-      description: path.basename(currentDirectory),
+      label: `$(folder-opened) ${path.basename(currentDirectory)}`,
       kind: vscode.QuickPickItemKind.Separator,
     },
+
     ...currentItems,
 
     {
-      label: "$(folder) Parent directory",
-      description: path.basename(parentDirectory),
+      label: `$(folder) ${path.basename(parentDirectory)}`,
       kind: vscode.QuickPickItemKind.Separator,
     },
+
     ...parentItems,
   ];
 
   const quickPick = vscode.window.createQuickPick<FileItem>();
 
   quickPick.placeholder = "Search files in current and parent directories...";
+
   quickPick.matchOnDescription = true;
   quickPick.items = items;
 
@@ -71,6 +72,17 @@ async function showSiblingFiles(): Promise<void> {
     const selected = quickPick.selectedItems[0];
 
     if (!selected?.filePath) {
+      return;
+    }
+
+    const stat = await fs.stat(selected.filePath);
+
+    if (stat.isDirectory()) {
+      await vscode.commands.executeCommand(
+        "revealFileInOS",
+        vscode.Uri.file(selected.filePath),
+      );
+
       return;
     }
 
@@ -88,50 +100,95 @@ async function showSiblingFiles(): Promise<void> {
   quickPick.show();
 }
 
-async function getDirectoryItems(directory: string): Promise<FileItem[]> {
+async function getCurrentDirectoryItems(
+  directory: string,
+  currentFile: string,
+): Promise<FileItem[]> {
+  const entries = await readDirectory(directory);
+
+  return entries
+    .filter((entry) => entry.fullPath !== currentFile)
+    .map((entry) => ({
+      label: entry.isDirectory
+        ? `$(folder) ${entry.name}/`
+        : `$(file) ${entry.name}`,
+      description: entry.isDirectory ? "directory" : "file",
+      filePath: entry.fullPath,
+    }));
+}
+
+async function getParentDirectoryItems(
+  parentDirectory: string,
+): Promise<FileItem[]> {
+  const entries = await readDirectory(parentDirectory);
+
+  const items: FileItem[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory) {
+      items.push({
+        label: `$(file) ${entry.name}`,
+        description: path.basename(parentDirectory),
+        filePath: entry.fullPath,
+      });
+
+      continue;
+    }
+
+    const children = await readDirectory(entry.fullPath);
+
+    items.push({
+      label: `$(folder) ${entry.name}/`,
+      description: "directory",
+      filePath: entry.fullPath,
+    });
+
+    for (const child of children) {
+      items.push({
+        label: child.isDirectory
+          ? `    $(folder) ${child.name}/`
+          : `    $(file) ${child.name}`,
+        description: `${entry.name}/`,
+        filePath: child.fullPath,
+      });
+    }
+  }
+
+  return items;
+}
+
+async function readDirectory(directory: string): Promise<
+  Array<{
+    name: string;
+    fullPath: string;
+    isDirectory: boolean;
+  }>
+> {
   try {
     const entries = await fs.readdir(directory, {
       withFileTypes: true,
     });
 
-    const items: FileItem[] = [];
-
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (IGNORED_DIRECTORIES.has(entry.name)) {
-          continue;
+    return entries
+      .filter((entry) => {
+        if (entry.isDirectory()) {
+          return !IGNORED_DIRECTORIES.has(entry.name);
         }
 
-        items.push({
-          label: `$(folder) ${entry.name}/`,
-          description: "directory",
-          filePath: path.join(directory, entry.name),
-        });
+        return !IGNORED_FILES.has(entry.name);
+      })
+      .map((entry) => ({
+        name: entry.name,
+        fullPath: path.join(directory, entry.name),
+        isDirectory: entry.isDirectory(),
+      }))
+      .sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) {
+          return a.isDirectory ? -1 : 1;
+        }
 
-        continue;
-      }
-
-      if (IGNORED_FILES.has(entry.name)) {
-        continue;
-      }
-
-      items.push({
-        label: `$(file) ${entry.name}`,
-        description: "file",
-        filePath: path.join(directory, entry.name),
+        return a.name.localeCompare(b.name);
       });
-    }
-
-    return items.sort((a, b) => {
-      const aIsDirectory = a.description === "directory";
-      const bIsDirectory = b.description === "directory";
-
-      if (aIsDirectory !== bIsDirectory) {
-        return aIsDirectory ? -1 : 1;
-      }
-
-      return a.label.localeCompare(b.label);
-    });
   } catch {
     return [];
   }
